@@ -4,11 +4,12 @@ import type Config from '../config.js';
 import {MessageError, ProcessTermError} from '../errors.js';
 import * as constants from '../constants.js';
 import * as child from './child.js';
-import {exists} from './fs.js';
+import {exists, makeTempDir} from './fs.js';
 import {registries} from '../resolvers/index.js';
 import {fixCmdWinSlashes} from './fix-cmd-win-slashes.js';
-import {getBinFolder as getGlobalBinFolder, run as globalRun} from '../cli/commands/global.js';
+import {run as globalRun} from '../cli/commands/global.js';
 
+const fs = require('fs');
 const path = require('path');
 
 export type LifecycleReturn = Promise<{
@@ -142,10 +143,6 @@ export async function makeEnv(
   const envPath = env[constants.ENV_PATH_KEY];
   const pathParts = envPath ? envPath.split(path.delimiter) : [];
 
-  // Include the directory that contains node so that we can guarantee that the scripts
-  // will always run with the exact same Node release than the one use to run Yarn
-  pathParts.unshift(path.dirname(process.execPath));
-
   // Include node-gyp version that was bundled with the current Node.js version,
   // if available.
   pathParts.unshift(path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'node-gyp-bin'));
@@ -157,13 +154,6 @@ export async function makeEnv(
     path.join(path.dirname(process.execPath), '..', 'libexec', 'lib', 'node_modules', 'npm', 'bin', 'node-gyp-bin'),
   );
 
-  // Add global bin folder if it is not present already, as some packages depend
-  // on a globally-installed version of node-gyp.
-  const globalBin = await getGlobalBinFolder(config, {});
-  if (pathParts.indexOf(globalBin) === -1) {
-    pathParts.unshift(globalBin);
-  }
-
   // add .bin folders to PATH
   for (const registry of Object.keys(registries)) {
     const binFolder = path.join(config.registries[registry].folder, '.bin');
@@ -174,8 +164,23 @@ export async function makeEnv(
     pathParts.unshift(path.join(cwd, binFolder));
   }
 
-  if (config.scriptsPrependNodePath) {
-    pathParts.unshift(path.join(path.dirname(process.execPath)));
+  // Unless disabled or forced, add temp symlinks of yarn/node in PATH only if needed
+  if (config.scriptsPrependNodePath !== false) {
+    let tempFolder = null;
+    for (const bin of [constants.YARN_BIN_PATH, constants.NODE_BIN_PATH]) {
+      const link = config.scriptsPrependNodePath || pathParts.indexOf(path.dirname(bin)) < 0;
+      if (!link) {
+        continue;
+      }
+      if (tempFolder == null) {
+        tempFolder = await makeTempDir('temp-bin');
+      }
+      await fs.symlink(bin, path.resolve(tempFolder, path.basename(bin)));
+    }
+
+    if (tempFolder != null) {
+      pathParts.unshift(tempFolder);
+    }
   }
 
   // join path back together
